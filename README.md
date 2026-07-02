@@ -1,15 +1,19 @@
 # Ollama Voice
 
-A fully local, bidirectional Speech-to-Speech service using Ollama, Whisper, and TTS. Supports GPU acceleration when available.
+![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)
+![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-green)
+![100% Local](https://img.shields.io/badge/privacy-100%25%20local-orange)
+
+A fully local, private voice assistant — bidirectional Speech-to-Speech powered by Ollama, Whisper, and TTS. No cloud APIs, no subscriptions, no data leaving your machine. Supports GPU acceleration when available.
 
 ## Features
 
-- 🎤 **Speech-to-Text**: Uses `faster-whisper` for accurate, local speech recognition
-- 🤖 **LLM Processing**: Integrates with Ollama for local language model processing
-- 🔊 **Text-to-Speech**: Uses system voices via `pyttsx3` for natural speech synthesis
+- 🎤 **Speech-to-Text**: Uses `faster-whisper` for accurate, local speech recognition with VAD-based silence detection
+- 🤖 **LLM Processing**: Integrates with Ollama — swap in any local model (Llama, Qwen, Gemma, DeepSeek, ...)
+- 🔊 **Text-to-Speech**: Uses system voices via `pyttsx3` for offline speech synthesis
 - ⚡ **GPU Accelerated**: Leverages GPU acceleration when available
-- 🔒 **Fully Local**: All processing happens locally, no cloud services required
-- 🎯 **Real-time**: Continuous listening with silence detection for natural conversation flow
+- 🔒 **Fully Local & Private**: All processing happens on-device — ideal for privacy-first, local-first AI setups
+- 🎯 **Hands-free Conversation**: Continuous listening with adaptive silence detection and echo prevention for natural back-and-forth
 
 ## Prerequisites
 
@@ -18,7 +22,7 @@ A fully local, bidirectional Speech-to-Speech service using Ollama, Whisper, and
 3. **Ollama** installed and running
    ```bash
    # Download from https://ollama.com
-   # Or use your system's package manager
+   # Or use your system's package manager (brew, apt, pacman, ...)
    ```
 
 4. **Ollama Model** - Pull a model (e.g., llama3.2):
@@ -26,30 +30,35 @@ A fully local, bidirectional Speech-to-Speech service using Ollama, Whisper, and
    ollama pull llama3.2
    ```
 
-## Installation
+## Quick Start
 
-1. Clone this repository:
-   ```bash
-   git clone <repository-url>
-   cd ollama-voice
-   ```
+```bash
+git clone <repository-url>
+cd ollama-voice
 
-2. Install Python dependencies:
+# Check prerequisites (Python, Ollama install, Ollama server + models)
+./setup.sh
+
+# Create a virtual environment, install dependencies, and launch
+./run.sh
+```
+
+## Manual Installation
+
+1. Install Python dependencies:
    ```bash
    pip install -r requirements.txt
    ```
 
-3. Ensure Ollama is running:
+2. Ensure Ollama is running:
    ```bash
    ollama serve
    ```
 
-## Usage
-
-Run the service:
-```bash
-python main.py
-```
+3. Run the service:
+   ```bash
+   python main.py
+   ```
 
 ### Command-line Options
 
@@ -61,24 +70,59 @@ Options:
 - `--model`: Ollama model to use (default: `llama3.2`)
 - `--whisper-model`: Whisper model size - `tiny`, `base`, `small`, `medium`, `large-v2` (default: `base`)
 - `--sample-rate`: Audio sample rate in Hz (default: `16000`)
+- `--silence-duration`: Seconds of silence before ending a recording (default: `1.5`)
+- `--max-duration`: Maximum recording duration in seconds (default: none, uses silence detection)
 
-### Example
+### Examples
 
 ```bash
 # Use a different Ollama model
-python main.py --model llama3.1
+python main.py --model qwen3
 
 # Use a larger Whisper model for better accuracy
 python main.py --whisper-model medium
+
+# Fixed-length recording instead of silence detection
+python main.py --max-duration 5
+```
+
+## Choosing a Model
+
+Any model in the [Ollama library](https://ollama.com/library) works. For voice conversation, response latency matters more than raw capability, so smaller models often feel better. Popular picks:
+
+| Model | Best for |
+|-------|----------|
+| `llama3.2` (default) | Fast, lightweight conversation on modest hardware |
+| `qwen3` | Strong all-round quality, reasoning, and tool use |
+| `gemma3` | Efficient responses on small GPUs / CPU-only machines |
+| `deepseek-r1` | Deeper reasoning (slower — expect longer pauses) |
+| `llama3.1` | Larger general-purpose alternative |
+
+```bash
+ollama pull qwen3
+python main.py --model qwen3
 ```
 
 ## How It Works
 
-1. **Audio Capture**: Records audio from your microphone using `sounddevice`
-2. **Speech Recognition**: Converts speech to text using `faster-whisper` (local Whisper implementation)
+1. **Audio Capture**: Records audio from your microphone using `sounddevice`, with adaptive energy thresholds for speech detection
+2. **Speech Recognition**: Converts speech to text using `faster-whisper` (local Whisper implementation with built-in VAD)
 3. **LLM Processing**: Sends transcribed text to Ollama for processing
 4. **Speech Synthesis**: Converts LLM response to speech using system TTS voices
-5. **Continuous Loop**: Repeats the process for bidirectional conversation
+5. **Continuous Loop**: Stops recording while speaking (to prevent echo/feedback), then listens again for natural bidirectional conversation
+
+## Project Structure
+
+```
+main.py           # Entry point and conversation loop
+audio.py          # Microphone capture and silence detection
+transcription.py  # Whisper speech-to-text
+llm.py            # Ollama integration
+tts.py            # Text-to-speech synthesis
+models.py         # Model initialization
+config.py         # Tunable constants (thresholds, delays, voices)
+state.py          # Shared runtime state
+```
 
 ## Troubleshooting
 
@@ -90,6 +134,7 @@ python main.py --whisper-model medium
 ### Audio Issues
 - Check microphone permissions in your system settings
 - Verify audio input device: `python -c "import sounddevice; print(sounddevice.query_devices())"`
+- If speech isn't detected, try a fixed recording window: `python main.py --max-duration 5`
 
 ### Whisper Model Download
 - First run will download the Whisper model automatically
@@ -97,6 +142,7 @@ python main.py --whisper-model medium
 
 ### TTS Voice Issues
 - List available voices: `python -c "import pyttsx3; e = pyttsx3.init(); print([v.name for v in e.getProperty('voices')])"`
+- Preferred voices, speech rate, and volume can be adjusted in `config.py`
 
 ## Performance Tips
 
@@ -105,10 +151,10 @@ python main.py --whisper-model medium
   - `base`: Good balance (default)
   - `medium`/`large-v2`: Better accuracy, slower
   
-- **Ollama Model**: Smaller models (like `llama3.2`) are faster, larger models provide better responses
+- **Ollama Model**: Smaller models (like `llama3.2` or `gemma3`) keep the conversation snappy; larger models give better answers at the cost of latency
 
 - **GPU Acceleration**: Ollama automatically uses GPU acceleration when available
 
 ## License
 
-See LICENSE file for details.
+Apache License 2.0 — see [LICENSE](LICENSE) for details.

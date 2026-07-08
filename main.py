@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Bidirectional Speech-to-Speech service using Ollama.
+Bidirectional Speech-to-Speech service using Ollama or Furiosa LLM.
 
 This module provides a fully local implementation with GPU acceleration support.
-It integrates Whisper for speech-to-text, Ollama for LLM processing, and pyttsx3 for
-text-to-speech synthesis.
+It integrates Whisper for speech-to-text, a switchable LLM backend (Ollama or
+Furiosa LLM) for processing, and pyttsx3 for text-to-speech synthesis.
 
 The service operates in a continuous loop:
 1. Records audio from microphone until silence is detected
 2. Transcribes audio to text using Whisper
-3. Processes text with Ollama LLM
+3. Processes text with the LLM backend
 4. Converts LLM response to speech using TTS
 5. Repeats the cycle for bidirectional conversation
 """
@@ -36,20 +36,39 @@ def main() -> None:
     and runs the main conversation loop. The loop continuously:
     1. Records audio until silence is detected
     2. Transcribes audio to text
-    3. Processes text with Ollama LLM
+    3. Processes text with the LLM backend
     4. Converts response to speech
     5. Repeats the cycle
 
     The function handles graceful shutdown on KeyboardInterrupt (Ctrl+C).
     """
     parser = argparse.ArgumentParser(
-        description="Bidirectional Speech-to-Speech service using Ollama"
+        description="Bidirectional Speech-to-Speech service using Ollama or Furiosa LLM"
+    )
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default=config.DEFAULT_LLM_BACKEND,
+        choices=["ollama", "furiosa"],
+        help=f"LLM backend to use (default: {config.DEFAULT_LLM_BACKEND})",
     )
     parser.add_argument(
         "--model",
         type=str,
-        default="llama3.2",
-        help="Ollama model to use (default: llama3.2)",
+        default=None,
+        help=(
+            f"Model to use (default: {config.DEFAULT_OLLAMA_MODEL} for ollama, "
+            f"{config.DEFAULT_FURIOSA_MODEL} for furiosa)"
+        ),
+    )
+    parser.add_argument(
+        "--llm-url",
+        type=str,
+        default=config.DEFAULT_FURIOSA_URL,
+        help=(
+            "Base URL of the OpenAI-compatible Furiosa LLM server, used with "
+            f"--backend furiosa (default: {config.DEFAULT_FURIOSA_URL})"
+        ),
     )
     parser.add_argument(
         "--whisper-model",
@@ -79,6 +98,14 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Resolve the per-backend model default when --model is not given
+    if args.model is None:
+        args.model = (
+            config.DEFAULT_FURIOSA_MODEL
+            if args.backend == "furiosa"
+            else config.DEFAULT_OLLAMA_MODEL
+        )
+
     # Test microphone before proceeding
     # This catches permission issues and hardware problems early
     if not audio.test_microphone(args.sample_rate):
@@ -90,14 +117,22 @@ def main() -> None:
         if response.lower() != "y":
             sys.exit(1)
 
-    # Initialize all models (Whisper, TTS, verify Ollama)
-    ollama_model = models.initialize_models(args.whisper_model, args.model)
+    # Initialize all models (Whisper, TTS, verify the LLM backend)
+    llm_model = models.initialize_models(
+        args.whisper_model, args.model, args.backend, args.llm_url
+    )
+
+    # Human-readable backend name for status messages
+    backend_name = "Furiosa LLM" if args.backend == "furiosa" else "Ollama"
 
     # Display startup banner
     print("\n" + "=" * 60)
     print("Speech-to-Speech Service Started")
     print("=" * 60)
-    print(f"Model: {ollama_model}")
+    print(f"Backend: {backend_name}")
+    print(f"Model: {llm_model}")
+    if args.backend == "furiosa":
+        print(f"Server: {args.llm_url}")
     print("Press Ctrl+C to exit")
     print("=" * 60 + "\n")
 
@@ -138,9 +173,11 @@ def main() -> None:
 
             print(f"👤 You: {text}")
 
-            # Step 3: Process text with Ollama LLM
-            print("🤖 Processing with Ollama...")
-            response = llm.process_with_ollama(text, ollama_model)
+            # Step 3: Process text with the LLM backend
+            print(f"🤖 Processing with {backend_name}...")
+            response = llm.generate_response(
+                text, args.backend, llm_model, args.llm_url
+            )
 
             print(f"🤖 Assistant: {response}")
 

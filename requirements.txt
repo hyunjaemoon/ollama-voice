@@ -1,5 +1,6 @@
 faster-whisper
 ollama
 pyttsx3
+requests
 sounddevice
 numpy

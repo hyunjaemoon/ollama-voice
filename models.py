@@ -1,15 +1,16 @@
 """
-Model initialization for Whisper, TTS, and Ollama.
+Model initialization for Whisper, TTS, and the LLM backend.
 
 This module handles the initialization of all models used in the service,
 including Whisper for speech recognition, TTS engine for text-to-speech,
-and verification of Ollama connectivity.
+and verification of LLM backend connectivity (Ollama or Furiosa LLM).
 """
 
 import sys
 
 import ollama
 import pyttsx3
+import requests
 from faster_whisper import WhisperModel
 
 import config
@@ -17,24 +18,29 @@ import state
 
 
 def initialize_models(
-    whisper_model_size: str = "base", ollama_model: str = "llama3.2"
+    whisper_model_size: str = "base",
+    llm_model: str = config.DEFAULT_OLLAMA_MODEL,
+    backend: str = config.DEFAULT_LLM_BACKEND,
+    llm_url: str = config.DEFAULT_FURIOSA_URL,
 ) -> str:
     """
-    Initialize Whisper, TTS engine, and verify Ollama connection.
+    Initialize Whisper, TTS engine, and verify the LLM backend connection.
 
     This function loads the Whisper model for speech recognition, initializes the
     TTS engine with preferred voice settings, and performs a connectivity test
-    with Ollama to ensure the service is available.
+    with the LLM backend to ensure the service is available.
 
     Args:
         whisper_model_size: Size of Whisper model to load (tiny, base, small, medium, large-v2)
-        ollama_model: Name of Ollama model to use for LLM processing
+        llm_model: Name of the model to use for LLM processing
+        backend: LLM backend to verify ("ollama" or "furiosa")
+        llm_url: Base URL of the OpenAI-compatible server (furiosa backend only)
 
     Returns:
-        The name of the verified Ollama model
+        The name of the verified LLM model
 
     Raises:
-        SystemExit: If Ollama connection fails or model cannot be initialized
+        SystemExit: If the LLM backend connection fails or model cannot be initialized
     """
     # Initialize Whisper model for speech-to-text conversion
     # Try to leverage GPU acceleration when available (e.g., CUDA on NVIDIA)
@@ -108,13 +114,29 @@ def initialize_models(
     # Store TTS engine in global state
     state.tts_engine = tts_engine
 
-    # Verify Ollama connection by attempting a test generation
-    # This ensures the service is running and the model is available before proceeding
+    # Verify the LLM backend connection before proceeding
+    # This ensures the service is running and the model is available
+    if backend == "furiosa":
+        try:
+            print(f"Checking Furiosa LLM server at '{llm_url}'...")
+            response = requests.get(
+                f"{llm_url.rstrip('/')}/models",
+                timeout=config.LLM_REQUEST_TIMEOUT,
+            )
+            response.raise_for_status()
+            print("Furiosa LLM connection verified!")
+            return llm_model
+        except Exception as e:
+            print(f"Error connecting to Furiosa LLM: {e}")
+            print("Please ensure the server is running: furiosa-llm serve <model>")
+            sys.exit(1)
+
+    # Default: verify Ollama by attempting a test generation
     try:
-        print(f"Checking Ollama model '{ollama_model}'...")
-        response = ollama.generate(model=ollama_model, prompt="test")
+        print(f"Checking Ollama model '{llm_model}'...")
+        response = ollama.generate(model=llm_model, prompt="test")
         print("Ollama connection verified!")
-        return ollama_model
+        return llm_model
     except Exception as e:
         print(f"Error connecting to Ollama: {e}")
         print("Please ensure Ollama is running: ollama serve")

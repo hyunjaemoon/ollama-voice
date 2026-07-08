@@ -62,6 +62,15 @@ NO_DATA_PROCESSING_COUNT: int = 50
 # Minimum chunks before processing without new data
 MIN_AUDIO_CHUNKS_FOR_PROCESSING: int = 10
 
+# LLM backend configuration
+DEFAULT_LLM_BACKEND: str = "ollama"  # LLM backend: "ollama" or "furiosa"
+DEFAULT_OLLAMA_MODEL: str = "llama3.2"  # Default model for the Ollama backend
+# Default model for the Furiosa backend ("EMPTY" routes to the served model)
+DEFAULT_FURIOSA_MODEL: str = "EMPTY"
+# Default base URL for a `furiosa-llm serve` OpenAI-compatible endpoint
+DEFAULT_FURIOSA_URL: str = "http://localhost:8000/v1"
+LLM_REQUEST_TIMEOUT: float = 120.0  # Timeout for HTTP LLM requests in seconds
+
 # TTS configuration
 TTS_RATE: int = 180  # Speech rate in words per minute
 TTS_VOLUME: float = 0.9  # Speech volume (0.0 to 1.0)

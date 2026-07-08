@@ -1,16 +1,86 @@
 """
-LLM processing using Ollama.
+LLM processing with switchable backends.
 
-This module handles text processing with Ollama LLM, including response
-extraction and error handling for various response formats.
+This module handles text processing with the configured LLM backend:
+- "ollama": the local Ollama service via the ollama Python package
+- "furiosa": a Furiosa LLM server (`furiosa-llm serve`) via its
+  OpenAI-compatible HTTP API
+
+Both backends share the same contract: return the response text, or a
+spoken-friendly error message if processing fails.
 """
 
 import re
 import traceback
 
 import ollama
+import requests
 
-import state
+import config
+
+# Generic error message returned to the user (and spoken by TTS) on failure
+LLM_ERROR_MESSAGE = "I'm sorry, I encountered an error processing your request."
+
+
+def generate_response(text: str, backend: str, model: str, llm_url: str) -> str:
+    """
+    Process text with the configured LLM backend.
+
+    Args:
+        text: Input text to process
+        backend: LLM backend to use ("ollama" or "furiosa")
+        model: Name of the model to use
+        llm_url: Base URL of the OpenAI-compatible server (furiosa backend only)
+
+    Returns:
+        LLM response text, or error message if processing fails
+    """
+    if backend == "furiosa":
+        return process_with_furiosa(text, model, llm_url)
+    return process_with_ollama(text, model)
+
+
+def process_with_furiosa(text: str, model: str, base_url: str) -> str:
+    """
+    Process text with a Furiosa LLM server via its OpenAI-compatible API.
+
+    Sends a chat completion request to a running `furiosa-llm serve` instance
+    and extracts the assistant message from the response.
+
+    Args:
+        text: Input text to process
+        model: Model name to request ("EMPTY" routes to the served model)
+        base_url: Base URL of the server, e.g. "http://localhost:8000/v1"
+
+    Returns:
+        LLM response text, or error message if processing fails
+    """
+    try:
+        response = requests.post(
+            f"{base_url.rstrip('/')}/chat/completions",
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": text}],
+            },
+            timeout=config.LLM_REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        payload = response.json()
+
+        # OpenAI-compatible response: choices[0].message.content
+        choices = payload.get("choices") or []
+        if choices:
+            content = (choices[0].get("message") or {}).get("content")
+            if content:
+                return str(content).strip()
+
+        print(f"⚠️  Unexpected response from Furiosa LLM: {str(payload)[:200]}...")
+        return LLM_ERROR_MESSAGE
+
+    except Exception as e:
+        print(f"Error processing with Furiosa LLM: {e}")
+        traceback.print_exc()
+        return LLM_ERROR_MESSAGE
 
 
 def process_with_ollama(text: str, model: str) -> str:
@@ -66,9 +136,9 @@ def process_with_ollama(text: str, model: str) -> str:
         print(
             f"⚠️  Could not extract response from Ollama. Type: {type(response_obj)}")
         print(f"   String representation: {response_str[:200]}...")
-        return "I'm sorry, I encountered an error processing your request."
+        return LLM_ERROR_MESSAGE
 
     except Exception as e:
         print(f"Error processing with Ollama: {e}")
         traceback.print_exc()
-        return "I'm sorry, I encountered an error processing your request."
+        return LLM_ERROR_MESSAGE

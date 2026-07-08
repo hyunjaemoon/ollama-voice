@@ -9,7 +9,7 @@ A fully local, private voice assistant — bidirectional Speech-to-Speech powere
 ## Features
 
 - 🎤 **Speech-to-Text**: Uses `faster-whisper` for accurate, local speech recognition with VAD-based silence detection
-- 🤖 **LLM Processing**: Integrates with Ollama — swap in any local model (Llama, Qwen, Gemma, DeepSeek, ...)
+- 🤖 **LLM Processing**: Integrates with Ollama — swap in any local model (Llama, Qwen, Gemma, DeepSeek, ...) — or a [Furiosa LLM](https://developer.furiosa.ai/v2026.3.0/en/get_started/furiosa_llm.html) server for RNGD NPU inference
 - 🔊 **Text-to-Speech**: Uses system voices via `pyttsx3` for offline speech synthesis
 - ⚡ **GPU Accelerated**: Leverages GPU acceleration when available
 - 🔒 **Fully Local & Private**: All processing happens on-device — ideal for privacy-first, local-first AI setups
@@ -67,7 +67,9 @@ python main.py --help
 ```
 
 Options:
-- `--model`: Ollama model to use (default: `llama3.2`)
+- `--backend`: LLM backend - `ollama` or `furiosa` (default: `ollama`)
+- `--model`: Model to use (default: `llama3.2` for ollama, `EMPTY` for furiosa)
+- `--llm-url`: Base URL of the Furiosa LLM server, used with `--backend furiosa` (default: `http://localhost:8000/v1`)
 - `--whisper-model`: Whisper model size - `tiny`, `base`, `small`, `medium`, `large-v2` (default: `base`)
 - `--sample-rate`: Audio sample rate in Hz (default: `16000`)
 - `--silence-duration`: Seconds of silence before ending a recording (default: `1.5`)
@@ -84,7 +86,28 @@ python main.py --whisper-model medium
 
 # Fixed-length recording instead of silence detection
 python main.py --max-duration 5
+
+# Use a Furiosa LLM server instead of Ollama
+python main.py --backend furiosa
+
+# Furiosa LLM on a remote RNGD host
+python main.py --backend furiosa --llm-url http://rngd-box:8000/v1
 ```
+
+### Using Furiosa LLM
+
+The agent can use [Furiosa LLM](https://developer.furiosa.ai/v2026.3.0/en/get_started/furiosa_llm.html)
+(FuriosaAI's serving framework for the RNGD NPU) as its LLM backend. On the
+machine with the NPU, launch the OpenAI-compatible server:
+
+```bash
+furiosa-llm serve furiosa-ai/Qwen3-32B-FP8
+```
+
+Then point the voice agent at it with `--backend furiosa`. By default the
+model is sent as `EMPTY`, which routes to whatever model the server is
+serving; pass `--model` to name one explicitly. The server can run on the
+same machine or a remote host (`--llm-url`).
 
 ## Choosing a Model
 
@@ -117,7 +140,7 @@ python main.py --model qwen3
 main.py           # Entry point and conversation loop
 audio.py          # Microphone capture and silence detection
 transcription.py  # Whisper speech-to-text
-llm.py            # Ollama integration
+llm.py            # LLM backends (Ollama, Furiosa LLM)
 tts.py            # Text-to-speech synthesis
 models.py         # Model initialization
 config.py         # Tunable constants (thresholds, delays, voices)

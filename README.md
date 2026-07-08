@@ -6,6 +6,19 @@
 
 A fully local, private voice assistant — bidirectional Speech-to-Speech powered by Ollama, Whisper, and TTS. No cloud APIs, no subscriptions, no data leaving your machine. Supports GPU acceleration when available.
 
+## Serving Monitor
+
+Beyond the voice loop, the project ships an OpenAI-compatible serving layer with a live monitoring dashboard. It wraps a multi-backend router (Echo demo + Ollama) behind an HTTP API and streams inference telemetry — TTFT, decode throughput, end-to-end latency, and system stats — over a websocket.
+
+![Serving monitor dashboard running the Ollama backend](docs/assets/dashboard.png)
+
+```bash
+# Launch the dashboard + OpenAI endpoint with the Ollama backend
+python serve.py --backends echo,ollama --ollama-model gemma4:12b-mlx --port 8000
+```
+
+Then open <http://127.0.0.1:8000> to switch the active backend live and send prompts from the browser, or point any OpenAI client (including the voice agent) at `http://127.0.0.1:8000/v1`.
+
 ## Features
 
 - 🎤 **Speech-to-Text**: Uses `faster-whisper` for accurate, local speech recognition with VAD-based silence detection

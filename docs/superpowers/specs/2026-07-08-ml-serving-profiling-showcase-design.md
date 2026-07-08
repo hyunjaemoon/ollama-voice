@@ -20,7 +20,7 @@ Every JD keyword maps to a real, runnable piece of the repo:
 | Optimize | dtype / `torch.compile` / weight-only quant flags, with measured before/after | Yes |
 | Deploy / serve (vLLM, SGLang) | `backends/openai_backend.py` client (vllm/sglang/furiosa presets) + `serve.py` self-built OpenAI server | Client + own server: yes. Real vLLM/SGLang: docs only (no GPU) |
 | Profile | `benchmark.py` + `profiling/` — TTFT, ITL, tokens/s, p50/p95, concurrency, `torch.profiler` | Yes |
-| Monitor | `serve.py` dashboard + `/ws` + `/metrics` | Yes |
+| Monitor | `serve.py` dashboard + `/ws` + `/metrics`, with a live backend selector (router) | Yes |
 
 ## Constraints & honesty policy
 
@@ -72,6 +72,12 @@ class LLMBackend(ABC):
 
 - **`ollama_backend.py`** — wraps current Ollama logic; adds streaming via
   `ollama.generate(..., stream=True)`. `load()` = test generation (as today).
+  Model-agnostic, so it runs quantized/MLX tags like `gemma4:12b-mlx` (NVFP4 +
+  MLX engine + multi-token prediction on Apple Silicon) with no code change.
+  **Reasoning-model handling:** for models that emit chain-of-thought, consume
+  only final content — read Ollama's separated `thinking` vs `response`/
+  `message.content` fields and strip any stray `<think>…</think>` — so the voice
+  path (and dashboard preview) never surfaces reasoning tokens.
 - **`openai_backend.py`** — uses the official `openai` Python client
   (`OpenAI(base_url=..., api_key="EMPTY")`). Named presets set default URL/model:
   - `vllm` → `http://localhost:8000/v1`
@@ -114,28 +120,56 @@ HF-backend flags, each with before/after numbers captured by `benchmark.py`:
 `docs/OPTIMIZATION.md` explains each technique, its measured impact, and how it
 maps to dedicated inference hardware (Furiosa RNGD, GPUs).
 
-### D6. Serving layer (`serve.py`, FastAPI + uvicorn)
+### D6. Serving layer + multi-backend router (`serve.py`, FastAPI + uvicorn)
 
-Wraps one loaded backend (default `hf`; `echo` for demos) and exposes:
+`serve.py` is a **lazy multi-backend router**, not a single-backend wrapper. It
+holds a `BackendRouter`: a registry of *configured* backends (from CLI/config)
+plus a "current" pointer. Requests route to the current backend; the dashboard
+can switch it live. Because every backend implements the same `LLMBackend`
+interface (D2), routing is uniform across in-process (`hf`, `ollama`, `echo`)
+and remote (`vllm`, `sglang`, `furiosa`) backends.
 
-- `GET  /v1/models` — lists the served model.
+Router behavior:
+
+- **Lazy init:** a backend's `load()` runs on first selection, not at startup
+  (so serving starts instantly and a 12 GB model only loads when chosen).
+- **Availability:** each configured backend has a status — `ready`, `loading`,
+  `available` (HTTP health check passed), or `unavailable` (in-process not yet
+  loaded / HTTP server unreachable). HTTP backends are health-checked
+  (`client.models.list()`); the result feeds the dashboard indicators.
+- **Graceful failure:** selecting or calling an unreachable backend returns a
+  clear "backend unavailable" error (HTTP 503 / spoken message), never a crash;
+  the previously-current backend stays active.
+- **Per-backend metrics:** `MetricsCollector` (D7) tags each record with the
+  serving backend so the dashboard can compare, e.g., `ollama:gemma4:12b-mlx`
+  vs `hf:Qwen2.5-0.5B` TTFT/tokens-sec side by side.
+
+Endpoints:
+
+- `GET  /v1/models` — lists the current backend's model.
 - `POST /v1/chat/completions` — `stream` true/false; non-stream returns
   OpenAI-shaped JSON, stream returns SSE chunks ending with `[DONE]`.
+- `GET  /api/backends` — configured backends + status + which is current.
+- `POST /api/backends/select` — `{name}`; switch the current backend
+  (lazy-loads / health-checks; returns new status).
 - `GET  /` — the monitoring dashboard (serves `web/dashboard.html`).
-- `WS   /ws` — pushes a metrics snapshot ~1×/sec for the live dashboard.
-- `GET  /api/stats` — JSON metrics snapshot (polling fallback for `/ws`).
-- `GET  /metrics` — Prometheus text exposition of the same metrics.
+- `WS   /ws` — pushes a metrics + backend-status snapshot ~1×/sec.
+- `GET  /api/stats` — JSON snapshot (polling fallback for `/ws`).
+- `GET  /metrics` — Prometheus text exposition.
 - `GET  /health` — liveness/readiness.
 
-Run: `python serve.py --model … --port 8000 [--backend hf|echo] [--dtype/--compile/--quantize]`.
-Every request is timed and recorded into the shared `MetricsCollector` (D7).
-This lets `main.py --backend vllm --llm-url http://localhost:8000/v1` (or the
-benchmark) drive **our own server live on the Mac**.
+Run: `python serve.py --port 8000 [--backends hf,ollama,echo] [--model …]
+[--dtype/--compile/--quantize]`. `--backends` lists which to register (default
+registers the locally-runnable set + any with a configured URL); the first is
+current. Every request is timed into the shared `MetricsCollector` (D7). This
+lets `main.py --backend vllm --llm-url http://localhost:8000/v1` (or the
+benchmark) drive **our own server live on the Mac**, and lets the dashboard flip
+`ollama (gemma4:12b-mlx, NVFP4/MLX)` ↔ `hf (Qwen bf16)` live.
 
 ### D7. Metrics core (`profiling/metrics.py`) — shared by benchmark + dashboard
 
-- `RequestRecord`: timestamp, prompt preview, ttft, inter-token latencies,
-  output tokens, e2e latency, status (ok/error).
+- `RequestRecord`: timestamp, serving backend (name:model), prompt preview,
+  ttft, inter-token latencies, output tokens, e2e latency, status (ok/error).
 - `MetricsCollector`: thread-safe; keeps a rolling window of records and
   in-flight count; computes aggregates — request count, error count, TTFT
   p50/p95, decode tokens/sec, e2e latency p50/p90/p95, requests/sec — plus
@@ -171,13 +205,19 @@ Self-contained single page — inline CSS/JS, **no CDN, no build step** (matches
 the repo's fully-local ethos; charts hand-rolled on `<canvas>`). Connects to
 `/ws` (falls back to polling `/api/stats`). Shows:
 
-- Header: service name, backend/model/device/dtype, uptime, health.
+- Header: service name, **backend selector**, current model/device/dtype,
+  uptime, health.
+- **Backend selector** (D6): dropdown/segmented control of configured backends,
+  each with a status dot (`ready` / `loading` / `available` / `unavailable`).
+  Selecting one `POST`s `/api/backends/select`; the UI shows a loading state
+  while a backend lazy-loads, and a clear inline error if it's unreachable
+  (never a silent failure). The active backend is highlighted.
 - KPI tiles: total requests, in-flight, TTFT p50/p95, decode tokens/sec, e2e
-  latency p50/p95, errors.
+  latency p50/p95, errors — for the **current** backend.
 - Live rolling charts: tokens/sec, latency, requests/sec.
 - System: CPU%, RAM (MPS mem when available).
-- Recent-requests table: time, prompt preview, output tokens, TTFT, latency,
-  status.
+- Recent-requests table: time, **serving backend**, prompt preview, output
+  tokens, TTFT, latency, status.
 
 ### D10. Dependencies split
 
@@ -196,7 +236,8 @@ the repo's fully-local ethos; charts hand-rolled on `<canvas>`). Connects to
 - **`backends/openai_backend.py`** ➕ vllm/sglang/furiosa presets.
 - **`backends/hf_backend.py`** ➕ PyTorch/HF + optimization.
 - **`backends/echo_backend.py`** ➕ test/demo backend.
-- **`serve.py`** ➕ FastAPI server + endpoints + dashboard wiring.
+- **`serve.py`** ➕ FastAPI server + `BackendRouter` (lazy multi-backend switch)
+  + endpoints + dashboard wiring.
 - **`web/dashboard.html`** ➕ monitoring UI.
 - **`profiling/metrics.py`** ➕ `MetricsCollector`, `RequestRecord`.
 - **`profiling/report.py`** ➕ table/CSV/JSON/chart output.
@@ -207,8 +248,10 @@ the repo's fully-local ethos; charts hand-rolled on `<canvas>`). Connects to
 - **`models.py`** ✎ keeps Whisper + TTS init; LLM verification removed (now
   `backend.load()`).
 - **`config.py`** ✎ backend presets/URLs, `DEFAULT_HF_MODEL=
-  "Qwen/Qwen2.5-0.5B-Instruct"`, dtype/device defaults, `LLM_MAX_NEW_TOKENS`,
-  `LLM_TEMPERATURE`, serving host/port, benchmark defaults.
+  "Qwen/Qwen2.5-0.5B-Instruct"`, a documented Apple-Silicon Ollama example
+  (`gemma4:12b-mlx`, NVFP4/MLX), dtype/device defaults, `LLM_MAX_NEW_TOKENS`,
+  `LLM_TEMPERATURE`, serving host/port, default `--backends` set, benchmark
+  defaults.
 - **`llm.py`** ✖ removed.
 - **`requirements-ml.txt`** ➕; **`requirements.txt`** unchanged.
 - **`tests/`** ➕ `test_backends.py`, `test_metrics.py`, `test_e2e.py`.
@@ -221,8 +264,12 @@ the repo's fully-local ethos; charts hand-rolled on `<canvas>`). Connects to
 - **Voice agent:** mic → Whisper → `backend.generate(prompt)` → TTS. (Loop shape
   unchanged; only the call target is now a backend object.)
 - **Serving:** client (`openai_backend` / curl / benchmark) → `serve.py`
-  `/v1/chat/completions` → `backend.stream|generate` → `MetricsCollector.record`
-  → response. `/ws` streams collector snapshots to the dashboard each second.
+  `/v1/chat/completions` → `BackendRouter.current` → `backend.stream|generate` →
+  `MetricsCollector.record` (tagged with the serving backend) → response. `/ws`
+  streams metrics + backend-status snapshots to the dashboard each second.
+- **Backend switch:** dashboard → `POST /api/backends/select {name}` →
+  `BackendRouter` lazy-`load()`s / health-checks the target, flips the current
+  pointer on success, and reports the new status; subsequent requests route to it.
 - **Benchmark:** `create_backend` → warmup → run prompts via `stream()` →
   `metrics.record` → `report` writes artifacts.
 
@@ -234,7 +281,9 @@ the repo's fully-local ethos; charts hand-rolled on `<canvas>`). Connects to
   `generate()` failure is caught and spoken as `LLM_ERROR_MESSAGE`, loop
   continues.
 - `serve.py`: request errors → OpenAI-style error JSON (HTTP 500) and recorded
-  as failed in metrics; server stays up.
+  as failed in metrics; server stays up. Selecting/calling an unreachable or
+  not-yet-loaded backend → HTTP 503 "backend unavailable"; the router keeps the
+  previously-current backend active (never crashes, never silently swaps).
 - `benchmark.py`: per-request failures counted; the run completes and reports
   the error rate.
 
@@ -246,20 +295,29 @@ the repo's fully-local ethos; charts hand-rolled on `<canvas>`). Connects to
   `BackendError` raised on failure. HF/torch tests are `skipif` torch absent, so
   CI stays light and no model is downloaded.
 - **End-to-end** (`test_e2e.py`): a fixture starts a real `uvicorn` server on an
-  ephemeral port with the **echo** backend, waits for `/health`, then drives it
-  through the actual `openai_backend` client — asserting non-stream content,
-  streamed deltas, `/v1/models`, `/api/stats` (metrics incremented), and
-  `/metrics` text. Genuine client→server→response path, no model download.
-- **Manual verification (live on Mac):** run `serve.py --backend hf` + open the
-  dashboard; run `benchmark.py --compare fp32,bf16,compiled` and commit the real
-  artifacts to `docs/benchmarks/`; run `main.py --backend hf`; point
-  `main.py --backend vllm --llm-url http://localhost:8000/v1` at the local
+  ephemeral port registering the **echo** backend (plus a deliberately
+  unreachable HTTP backend), waits for `/health`, then drives it through the
+  actual `openai_backend` client — asserting non-stream content, streamed
+  deltas, `/v1/models`, `/api/backends` status, a successful
+  `/api/backends/select` **switch**, a **503** when selecting the unreachable
+  backend, and `/api/stats` metrics (incremented, tagged with the serving
+  backend) + `/metrics` text. Genuine client→server→response and switch paths,
+  no model download.
+- **Manual verification (live on Mac):** run
+  `serve.py --backends hf,ollama,echo` + open the dashboard; toggle
+  `ollama (gemma4:12b-mlx)` ↔ `hf (Qwen bf16)` and confirm live metric changes;
+  run `benchmark.py --compare fp32,bf16,compiled` (and an ollama-mlx vs hf run)
+  and commit the real artifacts to `docs/benchmarks/`; run `main.py --backend hf`;
+  point `main.py --backend vllm --llm-url http://localhost:8000/v1` at the local
   server and hold a voice conversation while watching the dashboard.
 
 ## Out of scope (YAGNI)
 
 - Real GPU/NPU execution of vLLM/SGLang/Furiosa (no hardware).
-- Runtime backend switching mid-conversation (restart is seconds).
-- Multi-model routing, auth, or a production observability stack (Grafana etc.).
+- Runtime backend switching *in the voice agent* mid-conversation — the voice
+  agent fixes its backend at startup; live switching is a **serving-layer**
+  feature (dashboard router, D6), not a voice-loop one.
+- Auth, multi-tenant request routing, or a production observability stack
+  (Grafana/OpenTelemetry) — the router is a single-user local gateway.
 - Incremental/streaming TTS in the voice loop (backend streaming exists for the
-  profiler; wiring it into TTS is a separate change).
+  profiler and serving SSE; wiring it into TTS is a separate change).

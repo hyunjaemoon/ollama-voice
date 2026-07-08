@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ollama-voice · serving monitor</title>
+<style>
+  :root {
+    --bg: #0b0f17; --panel: #131a26; --panel2: #0f1521; --line: #223047;
+    --txt: #e6edf6; --muted: #8493a8; --accent: #5eead4; --accent2: #7dd3fc;
+    --ok: #34d399; --warn: #fbbf24; --err: #f87171; --idle: #64748b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--txt);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  }
+  a { color: var(--accent2); }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 20px 20px 60px; }
+  header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 18px; }
+  header h1 { font-size: 17px; margin: 0; letter-spacing: .2px; font-weight: 650; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .dot.ready, .dot.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .dot.loading { background: var(--warn); box-shadow: 0 0 8px var(--warn); animation: pulse 1s infinite; }
+  .dot.idle { background: var(--idle); }
+  .dot.error { background: var(--err); box-shadow: 0 0 8px var(--err); }
+  @keyframes pulse { 50% { opacity: .35; } }
+  .conn { margin-left: auto; color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 6px; }
+  .grid { display: grid; gap: 14px; }
+  .row { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; }
+  @media (max-width: 820px) { .row { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 12px; font-weight: 600; }
+  /* backend selector */
+  .backends { display: flex; gap: 10px; flex-wrap: wrap; }
+  .bk {
+    display: flex; align-items: center; gap: 9px; padding: 9px 13px; cursor: pointer;
+    background: var(--panel2); border: 1px solid var(--line); border-radius: 10px;
+    color: var(--txt); font-size: 13px; transition: border-color .15s, background .15s;
+  }
+  .bk:hover { border-color: #35507a; }
+  .bk.current { border-color: var(--accent); background: #0e2b2a; }
+  .bk .bk-model { color: var(--muted); font-size: 11px; }
+  .bk[disabled] { opacity: .55; cursor: default; }
+  /* KPI tiles */
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  @media (max-width: 820px) { .tiles { grid-template-columns: repeat(2, 1fr); } }
+  .tile { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 12px 13px; }
+  .tile .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+  .tile .v { font-size: 24px; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums;
+             font-family: "SF Mono", ui-monospace, Menlo, monospace; }
+  .tile .u { color: var(--muted); font-size: 12px; font-weight: 400; }
+  canvas { width: 100%; height: 120px; display: block; }
+  .chartlabel { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-bottom: 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  td.prompt { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+  .mono { font-family: "SF Mono", ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; }
+  .badge { font-size: 11px; padding: 1px 7px; border-radius: 20px; background: #1c2740; color: var(--accent2); }
+  /* prompt box */
+  .promptbox textarea {
+    width: 100%; min-height: 62px; resize: vertical; background: var(--panel2);
+    color: var(--txt); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+    font: inherit;
+  }
+  .promptbar { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
+  button.send {
+    background: var(--accent); color: #04211d; border: 0; border-radius: 9px;
+    padding: 9px 18px; font-weight: 650; cursor: pointer; font-size: 13px;
+  }
+  button.send:disabled { opacity: .5; cursor: default; }
+  .answer { margin-top: 12px; padding: 12px 14px; background: var(--panel2); border: 1px solid var(--line);
+            border-radius: 10px; min-height: 40px; white-space: pre-wrap; }
+  .answer .meta { color: var(--muted); font-size: 11px; margin-bottom: 6px; }
+  .toast { color: var(--muted); font-size: 12px; }
+  .toast.err { color: var(--err); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <span class="dot ok" id="healthDot"></span>
+    <h1>ollama-voice · serving monitor</h1>
+    <span class="badge" id="currentBadge">—</span>
+    <span class="conn"><span class="dot idle" id="connDot"></span><span id="connText">connecting…</span></span>
+  </header>
+
+  <div class="grid">
+    <!-- Backend selector -->
+    <div class="card">
+      <h2>Backend router — click to switch live</h2>
+      <div class="backends" id="backends"></div>
+      <div class="toast" id="selToast" style="margin-top:10px"></div>
+    </div>
+
+    <!-- KPI tiles -->
+    <div class="tiles" id="tiles"></div>
+
+    <div class="row">
+      <!-- Charts -->
+      <div class="card">
+        <div class="chartlabel"><span>Decode throughput</span><span id="tpsNow">— tok/s</span></div>
+        <canvas id="tpsChart"></canvas>
+        <div class="chartlabel" style="margin-top:14px"><span>End-to-end latency (p50)</span><span id="e2eNow">— s</span></div>
+        <canvas id="e2eChart"></canvas>
+      </div>
+      <!-- System -->
+      <div class="card">
+        <h2>System</h2>
+        <div id="sys"></div>
+      </div>
+    </div>
+
+    <!-- Prompt box -->
+    <div class="card promptbox">
+      <h2>Try it — send a prompt to the current backend</h2>
+      <textarea id="prompt" placeholder="Ask something… (⌘/Ctrl+Enter to send)">Explain what an NPU is in two sentences.</textarea>
+      <div class="promptbar">
+        <button class="send" id="sendBtn">Send</button>
+        <span class="toast" id="sendToast"></span>
+      </div>
+      <div class="answer" id="answer"><span class="meta">response will stream here…</span></div>
+    </div>
+
+    <!-- Recent requests -->
+    <div class="card">
+      <h2>Recent requests</h2>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr>
+            <th>Time</th><th>Backend</th><th>Prompt</th><th>TTFT</th><th>E2E</th><th>Tok</th><th>Status</th>
+          </tr></thead>
+          <tbody id="recent"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const fmt = (x, d=2, u="") => (x === null || x === undefined) ? "—" : (x.toFixed ? x.toFixed(d) : x) + u;
+const fmtMs = (s) => s === null || s === undefined ? "—" : (s*1000).toFixed(0) + " ms";
+let selecting = false;
+
+// ---- rolling charts (hand-rolled canvas, no libs) ----
+function makeChart(id, color) {
+  const c = document.getElementById(id);
+  const buf = [];
+  const MAX = 90;
+  function resize() { c.width = c.clientWidth * devicePixelRatio; c.height = c.clientHeight * devicePixelRatio; }
+  resize(); window.addEventListener('resize', () => { resize(); draw(); });
+  function push(v) { buf.push(v === null || v === undefined ? null : v); while (buf.length > MAX) buf.shift(); draw(); }
+  function draw() {
+    const ctx = c.getContext('2d'); const W = c.width, H = c.height; ctx.clearRect(0,0,W,H);
+    const vals = buf.filter(v => v !== null);
+    const max = Math.max(0.0001, ...vals), min = 0;
+    // gridlines
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)'; ctx.lineWidth = 1;
+    for (let i=0;i<=2;i++){ const y=H*i/2; ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+    if (buf.length < 2) return;
+    const stepX = W/(MAX-1);
+    ctx.beginPath(); ctx.lineWidth = 2*devicePixelRatio; ctx.strokeStyle = color;
+    let started=false;
+    buf.forEach((v,i)=>{ if(v===null){started=false;return;} const x=i*stepX; const y=H-((v-min)/(max-min))*(H*0.86)-H*0.07;
+      if(!started){ctx.moveTo(x,y);started=true;}else ctx.lineTo(x,y); });
+    ctx.stroke();
+    // fill
+    ctx.lineTo((buf.length-1)*stepX, H); ctx.lineTo(0,H); ctx.closePath();
+    ctx.fillStyle = color.replace('rgb','rgba').replace(')',',0.08)'); ctx.fill();
+  }
+  return { push };
+}
+const tpsChart = makeChart('tpsChart', 'rgb(94,234,212)');
+const e2eChart = makeChart('e2eChart', 'rgb(125,211,252)');
+
+// ---- render ----
+function renderBackends(router) {
+  const el = document.getElementById('backends'); el.innerHTML = '';
+  router.backends.forEach(b => {
+    const div = document.createElement('div');
+    div.className = 'bk' + (b.current ? ' current' : '');
+    div.innerHTML = `<span class="dot ${b.status}"></span>
+      <span>${b.label}${b.status==='loading'?' · loading…':''}
+      ${b.status==='error'?' · <span style="color:var(--err)">error</span>':''}</span>`;
+    if (selecting) div.setAttribute('disabled','');
+    div.onclick = () => selectBackend(b.name, b.current);
+    if (b.error) div.title = b.error;
+    el.appendChild(div);
+  });
+}
+function renderTiles(m) {
+  const tiles = [
+    ['Requests', m.total_requests, ''], ['In-flight', m.in_flight, ''],
+    ['Errors', m.errors, ''], ['Req/s', fmt(m.requests_per_s,2), ''],
+    ['TTFT p50', fmtMs(m.ttft_p50), ''], ['TTFT p95', fmtMs(m.ttft_p95), ''],
+    ['Decode', fmt(m.tokens_per_s,1), ' tok/s'], ['E2E p50', fmtMs(m.e2e_p50), ''],
+  ];
+  document.getElementById('tiles').innerHTML = tiles.map(([k,v,u]) =>
+    `<div class="tile"><div class="k">${k}</div><div class="v">${v}<span class="u">${u}</span></div></div>`).join('');
+}
+function renderSys(s, uptime, info) {
+  const rows = [
+    ['Backend', info.backend || '—'], ['Model', info.model || '—'],
+    ['Device', info.device || '—'], ['Uptime', Math.round(uptime)+' s'],
+    ['CPU', s.cpu_percent===null?'—':s.cpu_percent+' %'],
+    ['Memory', s.mem_percent===null?'—':`${s.mem_percent}% · ${fmt(s.mem_used_gb,1)}/${fmt(s.mem_total_gb,1)} GB`],
+  ];
+  document.getElementById('sys').innerHTML = rows.map(([k,v]) =>
+    `<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--line)">
+       <span style="color:var(--muted)">${k}</span><span class="mono">${v}</span></div>`).join('');
+}
+function renderRecent(recent) {
+  document.getElementById('recent').innerHTML = recent.map(r => {
+    const t = new Date(r.ts*1000).toLocaleTimeString();
+    return `<tr>
+      <td class="mono">${t}</td>
+      <td>${r.backend}</td>
+      <td class="prompt" title="${(r.prompt||'').replace(/"/g,'&quot;')}">${r.prompt||''}</td>
+      <td class="mono">${fmtMs(r.ttft)}</td>
+      <td class="mono">${fmtMs(r.e2e)}</td>
+      <td class="mono">${r.tokens}</td>
+      <td><span class="dot ${r.status==='ok'?'ok':'error'}"></span></td>
+    </tr>`; }).join('');
+}
+function update(data) {
+  const m = data.metrics, router = data.router, info = data.current_info;
+  renderBackends(router);
+  renderTiles(m);
+  renderSys(m.system, m.uptime_s, info);
+  renderRecent(m.recent || []);
+  document.getElementById('currentBadge').textContent =
+    (info.backend||'—') + (info.model ? ' · '+info.model : '');
+  document.getElementById('tpsNow').textContent = fmt(m.tokens_per_s,1) + ' tok/s';
+  document.getElementById('e2eNow').textContent = fmtMs(m.e2e_p50);
+  tpsChart.push(m.tokens_per_s || 0);
+  e2eChart.push(m.e2e_p50 || 0);
+}
+
+// ---- backend switching ----
+async function selectBackend(name, isCurrent) {
+  if (selecting || isCurrent) return;
+  selecting = true;
+  const toast = document.getElementById('selToast');
+  toast.className = 'toast'; toast.textContent = `Switching to ${name}… (first load can take a few seconds)`;
+  try {
+    const res = await fetch('/api/backends/select', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({name})
+    });
+    const body = await res.json();
+    if (!res.ok || !body.ok) { toast.className='toast err'; toast.textContent = `Could not switch to ${name}: ${body.error||res.status}`; }
+    else { toast.textContent = `Now serving: ${name}`; }
+  } catch (e) { toast.className='toast err'; toast.textContent = 'Switch failed: '+e; }
+  selecting = false;
+}
+
+// ---- prompt box (streaming) ----
+const sendBtn = document.getElementById('sendBtn');
+async function send() {
+  const prompt = document.getElementById('prompt').value.trim();
+  if (!prompt) return;
+  sendBtn.disabled = true;
+  const ans = document.getElementById('answer');
+  const badge = document.getElementById('currentBadge').textContent;
+  ans.innerHTML = `<div class="meta">${badge}</div>`;
+  const out = document.createElement('span'); ans.appendChild(out);
+  const t0 = performance.now();
+  try {
+    const res = await fetch('/v1/chat/completions', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({messages:[{role:'user',content:prompt}], stream:true})
+    });
+    if (!res.ok) { const e = await res.json().catch(()=>({}));
+      out.textContent = `[${res.status}] ${e.error?.message || 'request failed'}`; sendBtn.disabled=false; return; }
+    const reader = res.body.getReader(); const dec = new TextDecoder();
+    let buf = '', first = null;
+    while (true) {
+      const {done, value} = await reader.read(); if (done) break;
+      buf += dec.decode(value, {stream:true});
+      const lines = buf.split('\n'); buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (payload === '[DONE]') continue;
+        try { const j = JSON.parse(payload); const d = j.choices?.[0]?.delta?.content;
+          if (d) { if(first===null){first=performance.now()-t0;} out.textContent += d; } } catch {}
+      }
+    }
+    const meta = ans.querySelector('.meta');
+    meta.textContent = `${badge} · TTFT ${first?first.toFixed(0):'—'} ms · ${(performance.now()-t0).toFixed(0)} ms total`;
+  } catch (e) { out.textContent = 'Error: '+e; }
+  sendBtn.disabled = false;
+}
+sendBtn.onclick = send;
+document.getElementById('prompt').addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') send();
+});
+
+// ---- live feed: WebSocket with polling fallback ----
+let ws, pollTimer;
+function setConn(ok, text) {
+  document.getElementById('connDot').className = 'dot ' + (ok ? 'ready' : 'error');
+  document.getElementById('connText').textContent = text;
+}
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  try { ws = new WebSocket(`${proto}://${location.host}/ws`); } catch { return startPolling(); }
+  ws.onopen = () => { setConn(true, 'live · websocket'); if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } };
+  ws.onmessage = ev => update(JSON.parse(ev.data));
+  ws.onclose = () => { setConn(false, 'reconnecting…'); startPolling(); setTimeout(connect, 2500); };
+  ws.onerror = () => { try { ws.close(); } catch {} };
+}
+function startPolling() {
+  if (pollTimer) return;
+  pollTimer = setInterval(async () => {
+    try { const r = await fetch('/api/stats'); update(await r.json()); setConn(true, 'live · polling'); }
+    catch { setConn(false, 'disconnected'); }
+  }, 2000);
+}
+connect();
+</script>
+</body>
+</html>

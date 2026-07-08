@@ -1,0 +1,5 @@
+# Serving-layer dependencies (serve.py: OpenAI-compatible API + dashboard).
+# The core voice agent (main.py) does NOT need these — see requirements.txt.
+fastapi
+uvicorn[standard]
+psutil

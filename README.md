@@ -19,6 +19,14 @@ python serve.py --backends echo,ollama --ollama-model gemma4:12b-mlx --port 8000
 
 Then open <http://127.0.0.1:8000> to switch the active backend live and send prompts from the browser, or point any OpenAI client (including the voice agent) at `http://127.0.0.1:8000/v1`.
 
+### Voice chat
+
+The dashboard includes a push-to-talk voice chat: press the mic button, speak, and press again to send. Speech processing stays fully local on the server — the browser uploads your recording to `POST /v1/audio/transcriptions` (faster-whisper STT, loaded lazily on first use; size via `--whisper-model`), the reply streams through the metered `/v1/chat/completions` path, and `POST /v1/audio/speech` synthesizes a WAV (macOS `say`, or `pyttsx3` elsewhere) that plays back in the tab, along with a per-turn latency breakdown (STT · TTFT · LLM · TTS).
+
+```bash
+pip install -r requirements-serve.txt   # includes faster-whisper for voice chat
+```
+
 ## Features
 
 - 🎤 **Speech-to-Text**: Uses `faster-whisper` for accurate, local speech recognition with VAD-based silence detection

@@ -123,6 +123,17 @@
       <div class="answer" id="answer"><span class="meta">response will stream here…</span></div>
     </div>
 
+    <!-- Voice chat -->
+    <div class="card voicebox">
+      <h2>Voice chat — talk to the current backend</h2>
+      <div class="promptbar" style="margin-top:0">
+        <button class="send" id="micBtn">🎤 Start recording</button>
+        <span class="toast" id="voiceToast"></span>
+      </div>
+      <div class="answer" id="voiceLog"><span class="meta">press the mic, speak, then press again to send…</span></div>
+      <audio id="voiceAudio" hidden></audio>
+    </div>
+
     <!-- Recent requests -->
     <div class="card">
       <h2>Recent requests</h2>
@@ -296,6 +307,119 @@ sendBtn.onclick = send;
 document.getElementById('prompt').addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') send();
 });
+
+// ---- voice chat (push-to-talk) ----
+const micBtn = document.getElementById('micBtn');
+const voiceToast = document.getElementById('voiceToast');
+const voiceLog = document.getElementById('voiceLog');
+const voiceAudio = document.getElementById('voiceAudio');
+let rec = null;  // {ctx, stream, node, chunks}
+
+function vToast(msg, err=false) { voiceToast.className = 'toast' + (err ? ' err' : ''); voiceToast.textContent = msg; }
+function vLine(cls, text) {
+  const div = document.createElement('div');
+  if (cls === 'meta') { div.className = 'meta'; div.textContent = text; }
+  else { div.innerHTML = `<strong style="color:var(--${cls==='you'?'accent2':'accent'})">${cls==='you'?'You':'Assistant'}:</strong> `;
+         const span = document.createElement('span'); span.textContent = text || ''; div.appendChild(span); div._out = span; }
+  div.style.marginBottom = '6px';
+  voiceLog.appendChild(div);
+  voiceLog.scrollTop = voiceLog.scrollHeight;
+  return div;
+}
+
+function encodeWAV(chunks, rate) {
+  let n = 0; chunks.forEach(c => n += c.length);
+  const pcm = new Int16Array(n); let off = 0;
+  chunks.forEach(c => { for (let i=0;i<c.length;i++) pcm[off++] = Math.max(-1, Math.min(1, c[i])) * 0x7fff; });
+  const buf = new ArrayBuffer(44 + pcm.length*2); const v = new DataView(buf);
+  const ws = (o,s) => { for (let i=0;i<s.length;i++) v.setUint8(o+i, s.charCodeAt(i)); };
+  ws(0,'RIFF'); v.setUint32(4, 36 + pcm.length*2, true); ws(8,'WAVE'); ws(12,'fmt ');
+  v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
+  v.setUint32(24,rate,true); v.setUint32(28,rate*2,true); v.setUint16(32,2,true); v.setUint16(34,16,true);
+  ws(36,'data'); v.setUint32(40, pcm.length*2, true);
+  new Int16Array(buf, 44).set(pcm);
+  return new Blob([buf], {type:'audio/wav'});
+}
+
+async function startRecording() {
+  const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+  const ctx = new AudioContext({sampleRate: 16000});
+  const src = ctx.createMediaStreamSource(stream);
+  const node = ctx.createScriptProcessor(4096, 1, 1);
+  const chunks = [];
+  node.onaudioprocess = e => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  src.connect(node); node.connect(ctx.destination);
+  rec = {ctx, stream, node, chunks, rate: ctx.sampleRate};
+}
+
+function stopRecording() {
+  const {ctx, stream, node, chunks, rate} = rec; rec = null;
+  node.disconnect(); stream.getTracks().forEach(t => t.stop()); ctx.close();
+  return encodeWAV(chunks, rate);
+}
+
+async function voiceTurn(blob) {
+  micBtn.disabled = true;
+  const t0 = performance.now();
+  // 1. STT
+  vToast('transcribing…');
+  const fd = new FormData(); fd.append('file', blob, 'speech.wav');
+  const sttRes = await fetch('/v1/audio/transcriptions', {method:'POST', body: fd});
+  const stt = await sttRes.json();
+  if (!sttRes.ok) throw new Error(stt.error?.message || `STT failed (${sttRes.status})`);
+  vLine('you', stt.text);
+  // 2. LLM (streaming)
+  vToast('thinking…');
+  const line = vLine('asst', '');
+  const llmT0 = performance.now(); let first = null;
+  const res = await fetch('/v1/chat/completions', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({messages:[{role:'user',content:stt.text}], stream:true})
+  });
+  if (!res.ok) { const e = await res.json().catch(()=>({})); throw new Error(e.error?.message || `LLM failed (${res.status})`); }
+  const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '';
+  while (true) {
+    const {done, value} = await reader.read(); if (done) break;
+    buf += dec.decode(value, {stream:true});
+    const lines = buf.split('\n'); buf = lines.pop();
+    for (const l of lines) {
+      if (!l.startsWith('data:')) continue;
+      const p = l.slice(5).trim(); if (p === '[DONE]') continue;
+      try { const d = JSON.parse(p).choices?.[0]?.delta?.content;
+        if (d) { if (first===null) first = performance.now()-llmT0; line._out.textContent += d;
+                 voiceLog.scrollTop = voiceLog.scrollHeight; } } catch {}
+    }
+  }
+  const reply = line._out.textContent;
+  const llmMs = performance.now() - llmT0;
+  // 3. TTS + playback
+  vToast('synthesizing speech…');
+  const ttsRes = await fetch('/v1/audio/speech', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({input: reply})
+  });
+  if (!ttsRes.ok) { const e = await ttsRes.json().catch(()=>({})); throw new Error(e.error?.message || `TTS failed (${ttsRes.status})`); }
+  const ttsMs = ttsRes.headers.get('X-TTS-Ms');
+  voiceAudio.src = URL.createObjectURL(await ttsRes.blob());
+  voiceAudio.play().catch(()=>{});
+  vLine('meta', `STT ${stt.stt_ms} ms · TTFT ${first?first.toFixed(0):'—'} ms · LLM ${llmMs.toFixed(0)} ms · TTS ${ttsMs||'—'} ms · turn ${(performance.now()-t0).toFixed(0)} ms`);
+  vToast('');
+}
+
+micBtn.onclick = async () => {
+  if (!rec) {
+    try { await startRecording(); }
+    catch (e) { vToast('microphone unavailable: ' + (e.message || e), true); return; }
+    micBtn.textContent = '⏹ Stop & send';
+    vToast('recording… speak now');
+    return;
+  }
+  micBtn.textContent = '🎤 Start recording';
+  const blob = stopRecording();
+  try { await voiceTurn(blob); }
+  catch (e) { vToast(String(e.message || e), true); }
+  micBtn.disabled = false;
+};
 
 // ---- live feed: WebSocket with polling fallback ----
 let ws, pollTimer;

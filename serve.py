@@ -17,17 +17,24 @@ voice agent / benchmark at http://localhost:8000/v1).
 
 import argparse
 import asyncio
+import io
 import json
+import subprocess
+import sys
+import tempfile
 import threading
 import time
+import wave
 from pathlib import Path
 from typing import Iterator, List, Optional
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+import numpy as np
+from fastapi import FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import (
     FileResponse,
     JSONResponse,
     PlainTextResponse,
+    Response,
     StreamingResponse,
 )
 from starlette.concurrency import run_in_threadpool
@@ -245,6 +252,116 @@ def _blocking_completion(name: str, backend, model: str, prompt: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Voice: server-side STT (faster-whisper) + TTS (say / pyttsx3)
+# ---------------------------------------------------------------------------
+VOICE_SAMPLE_RATE = 16000
+WHISPER_MODEL_SIZE = "base"
+_whisper = None
+_whisper_lock = threading.Lock()
+_tts_lock = threading.Lock()
+
+
+def _get_whisper():
+    """Lazily load faster-whisper so serve.py startup stays instant."""
+    global _whisper
+    with _whisper_lock:
+        if _whisper is None:
+            from faster_whisper import WhisperModel
+            print(f"🎙  Loading Whisper '{WHISPER_MODEL_SIZE}' (first voice request)…")
+            _whisper = WhisperModel(WHISPER_MODEL_SIZE)
+        return _whisper
+
+
+def _decode_wav(data: bytes) -> np.ndarray:
+    """Decode a PCM16 WAV upload to mono float32 at VOICE_SAMPLE_RATE."""
+    with wave.open(io.BytesIO(data), "rb") as wf:
+        if wf.getsampwidth() != 2:
+            raise ValueError("expected 16-bit PCM WAV")
+        rate = wf.getframerate()
+        frames = wf.readframes(wf.getnframes())
+        audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+        if wf.getnchannels() > 1:
+            audio = audio.reshape(-1, wf.getnchannels()).mean(axis=1)
+    if rate != VOICE_SAMPLE_RATE and len(audio) > 1:
+        n = int(len(audio) * VOICE_SAMPLE_RATE / rate)
+        audio = np.interp(
+            np.linspace(0, len(audio) - 1, n), np.arange(len(audio)), audio
+        ).astype(np.float32)
+    return audio
+
+
+def _transcribe(audio: np.ndarray) -> str:
+    model = _get_whisper()
+    try:
+        segments, _ = model.transcribe(audio, beam_size=5, vad_filter=True)
+    except Exception:  # noqa: BLE001 - VAD can fail on some builds
+        segments, _ = model.transcribe(audio, beam_size=5, vad_filter=False)
+    return " ".join(s.text.strip() for s in segments).strip()
+
+
+def _synthesize_wav(text: str) -> bytes:
+    """Render text to a WAV file and return its bytes. Serialized: TTS engines
+    are not thread-safe."""
+    with _tts_lock:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "speech.wav"
+            if sys.platform == "darwin":
+                subprocess.run(
+                    ["say", "-o", str(path), "--data-format=LEI16@22050", text],
+                    check=True,
+                )
+            else:
+                import pyttsx3
+                engine = pyttsx3.init()
+                engine.save_to_file(text, str(path))
+                engine.runAndWait()
+            return path.read_bytes()
+
+
+@app.post("/v1/audio/transcriptions")
+async def audio_transcriptions(file: UploadFile = File(...)):
+    data = await file.read()
+    try:
+        audio = _decode_wav(data)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(status_code=400, content={
+            "error": {"message": f"could not decode audio: {e}"}})
+    if len(audio) < VOICE_SAMPLE_RATE // 10:  # < 0.1 s
+        return JSONResponse(status_code=422, content={
+            "error": {"message": "audio too short"}})
+    start = time.time()
+    try:
+        text = await run_in_threadpool(_transcribe, audio)
+    except ImportError:
+        return JSONResponse(status_code=503, content={"error": {"message":
+            "faster-whisper is not installed — pip install faster-whisper"}})
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(status_code=500, content={
+            "error": {"message": f"transcription failed: {e}"}})
+    if not text:
+        return JSONResponse(status_code=422, content={
+            "error": {"message": "didn't catch that — no speech detected"}})
+    return {"text": text, "stt_ms": round((time.time() - start) * 1000)}
+
+
+@app.post("/v1/audio/speech")
+async def audio_speech(req: Request):
+    body = await req.json()
+    text = (body.get("input") or "").strip()
+    if not text:
+        return JSONResponse(status_code=400,
+                            content={"error": {"message": "no input text"}})
+    start = time.time()
+    try:
+        wav = await run_in_threadpool(_synthesize_wav, text)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(status_code=500, content={
+            "error": {"message": f"speech synthesis failed: {e}"}})
+    return Response(content=wav, media_type="audio/wav", headers={
+        "X-TTS-Ms": str(round((time.time() - start) * 1000))})
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 @app.get("/health")
@@ -378,10 +495,14 @@ def main():
                         help="Model for the ollama backend (default: gemma4:12b-mlx)")
     parser.add_argument("--default", default=None,
                         help="Backend to start current (default: first registered)")
+    parser.add_argument("--whisper-model", default="base",
+                        help="Whisper model size for voice chat (default: base)")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
 
+    global WHISPER_MODEL_SIZE
+    WHISPER_MODEL_SIZE = args.whisper_model
     configure([b for b in args.backends.split(",") if b.strip()],
               args.ollama_model, default=args.default)
 

@@ -3,3 +3,7 @@
 fastapi
 uvicorn[standard]
 psutil
+# Voice chat (dashboard mic → Whisper STT; TTS uses macOS `say` or pyttsx3)
+numpy
+faster-whisper
+python-multipart

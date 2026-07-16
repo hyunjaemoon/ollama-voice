@@ -7,7 +7,7 @@ exercised immediately.
 """
 
 import time
-from typing import Iterator
+from typing import Iterator, Optional
 
 from .base import LLMBackend
 
@@ -23,7 +23,7 @@ class EchoBackend(LLMBackend):
         # Nothing to load.
         return None
 
-    def stream(self, prompt: str) -> Iterator[str]:
+    def stream(self, prompt: str, system: Optional[str] = None) -> Iterator[str]:
         reply = f"Echo backend received {len(prompt.split())} words. You said: {prompt}"
         for word in reply.split(" "):
             time.sleep(self._token_delay)  # simulate per-token decode latency

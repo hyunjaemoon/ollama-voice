@@ -7,7 +7,7 @@ the serving router, and the benchmark harness — can treat them uniformly.
 """
 
 from abc import ABC, abstractmethod
-from typing import Iterator
+from typing import Iterator, Optional
 
 
 class BackendError(Exception):
@@ -31,12 +31,16 @@ class LLMBackend(ABC):
         """Initialize / verify the backend. Raise ``BackendError`` on failure."""
 
     @abstractmethod
-    def stream(self, prompt: str) -> Iterator[str]:
-        """Yield incremental text deltas for ``prompt``."""
+    def stream(self, prompt: str, system: Optional[str] = None) -> Iterator[str]:
+        """Yield incremental text deltas for ``prompt``.
 
-    def generate(self, prompt: str) -> str:
+        ``system`` is an optional system prompt; backends that support one
+        should apply it, others may ignore it.
+        """
+
+    def generate(self, prompt: str, system: Optional[str] = None) -> str:
         """Return the full response text (default: join the stream)."""
-        return "".join(self.stream(prompt))
+        return "".join(self.stream(prompt, system=system))
 
     def info(self) -> dict:
         """Return backend metadata for banners, reports, and the dashboard."""

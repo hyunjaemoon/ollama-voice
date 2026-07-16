@@ -39,6 +39,8 @@ from fastapi.responses import (
 )
 from starlette.concurrency import run_in_threadpool
 
+import config
+import tls
 from backends import BackendError, create_backend
 from profiling import MetricsCollector, RequestRecord
 
@@ -180,11 +182,24 @@ def _extract_prompt(messages: List[dict]) -> str:
     ).strip()
 
 
+def _extract_system(messages: List[dict]) -> str:
+    """Join any client-provided system messages; default to the voice-agent
+    conversational prompt when none are given."""
+    parts = [
+        m.get("content", "") for m in messages
+        if m.get("role") == "system" and isinstance(m.get("content"), str)
+    ]
+    joined = "\n".join(p for p in parts if p).strip()
+    return joined or config.SYSTEM_PROMPT
+
+
 def _sse(obj: dict) -> str:
     return f"data: {json.dumps(obj)}\n\n"
 
 
-def _stream_completion(name: str, backend, model: str, prompt: str) -> Iterator[str]:
+def _stream_completion(
+    name: str, backend, model: str, prompt: str, system: str
+) -> Iterator[str]:
     """Sync generator producing OpenAI SSE chunks while recording metrics."""
     cmpl_id = f"chatcmpl-{int(time.time() * 1000)}"
     created = int(time.time())
@@ -198,7 +213,7 @@ def _stream_completion(name: str, backend, model: str, prompt: str) -> Iterator[
     yield _sse({**base, "choices": [
         {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]})
     try:
-        for delta in backend.stream(prompt):
+        for delta in backend.stream(prompt, system=system):
             if ttft is None:
                 ttft = time.time() - start
             ntok += 1
@@ -218,7 +233,9 @@ def _stream_completion(name: str, backend, model: str, prompt: str) -> Iterator[
             ttft=ttft, e2e=time.time() - start, output_tokens=ntok, status=status))
 
 
-def _blocking_completion(name: str, backend, model: str, prompt: str) -> dict:
+def _blocking_completion(
+    name: str, backend, model: str, prompt: str, system: str
+) -> dict:
     """Run a full (non-streaming) completion, recording metrics. Sync/blocking."""
     METRICS.start_request()
     start = time.time()
@@ -226,7 +243,7 @@ def _blocking_completion(name: str, backend, model: str, prompt: str) -> dict:
     parts: List[str] = []
     status = "ok"
     try:
-        for delta in backend.stream(prompt):
+        for delta in backend.stream(prompt, system=system):
             if ttft is None:
                 ttft = time.time() - start
             parts.append(delta)
@@ -381,7 +398,9 @@ async def list_models():
 @app.post("/v1/chat/completions")
 async def chat_completions(req: Request):
     body = await req.json()
-    prompt = _extract_prompt(body.get("messages", []))
+    messages = body.get("messages", [])
+    prompt = _extract_prompt(messages)
+    system = _extract_system(messages)
     stream = bool(body.get("stream", False))
     if not prompt:
         return JSONResponse(status_code=400,
@@ -394,11 +413,11 @@ async def chat_completions(req: Request):
     model = getattr(backend, "model", name)
     if stream:
         return StreamingResponse(
-            _stream_completion(name, backend, model, prompt),
+            _stream_completion(name, backend, model, prompt, system),
             media_type="text/event-stream")
     try:
         payload = await run_in_threadpool(
-            _blocking_completion, name, backend, model, prompt)
+            _blocking_completion, name, backend, model, prompt, system)
     except BackendError as e:
         return JSONResponse(status_code=500, content={"error": {"message": str(e)}})
     return payload
@@ -500,7 +519,18 @@ def main():
                              "voice chat (default: base)")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--ssl", action="store_true",
+                        help="Serve HTTPS with a cached self-signed cert "
+                             "(browsers require HTTPS for mic access away "
+                             "from localhost)")
+    parser.add_argument("--lan", action="store_true",
+                        help="Shortcut for --host 0.0.0.0 --ssl: reach the "
+                             "dashboard from a phone on the same Wi-Fi")
     args = parser.parse_args()
+
+    if args.lan:
+        args.host = "0.0.0.0"
+        args.ssl = True
 
     global WHISPER_MODEL_SIZE
     WHISPER_MODEL_SIZE = args.whisper_model
@@ -508,10 +538,28 @@ def main():
               args.ollama_model, default=args.default)
 
     import uvicorn
-    print(f"\n🚀 Serving dashboard at http://{args.host}:{args.port}")
+    ssl_kwargs = {}
+    scheme = "http"
+    if args.ssl:
+        cert, key = tls.ensure_self_signed_cert()
+        ssl_kwargs = {"ssl_certfile": str(cert), "ssl_keyfile": str(key)}
+        scheme = "https"
+
+    if args.host == "0.0.0.0":
+        urls = [f"{scheme}://127.0.0.1:{args.port}",
+                f"{scheme}://{tls.get_lan_ip()}:{args.port}"]
+    else:
+        urls = [f"{scheme}://{args.host}:{args.port}"]
+    print(f"\n🚀 Serving dashboard at {'  and  '.join(urls)}")
     print(f"   Backends: {args.backends}  (current: {ROUTER.current_name()})")
-    print(f"   OpenAI endpoint: http://{args.host}:{args.port}/v1\n")
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    print(f"   OpenAI endpoint: {urls[-1]}/v1")
+    if args.ssl:
+        print("   📱 On your phone (same Wi-Fi): open the last URL above and "
+              "accept the certificate\n      warning (Advanced → Proceed) — "
+              "HTTPS is what enables microphone access.")
+    print()
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info",
+                **ssl_kwargs)
 
 
 if __name__ == "__main__":

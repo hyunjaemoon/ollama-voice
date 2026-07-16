@@ -17,6 +17,7 @@ The service operates in a continuous loop:
 import argparse
 import queue
 import sys
+import threading
 import time
 
 import audio
@@ -24,6 +25,7 @@ import config
 import llm
 import models
 import state
+import text_stream
 import transcription
 import tts
 
@@ -173,27 +175,30 @@ def main() -> None:
 
             print(f"👤 You: {text}")
 
-            # Step 3: Process text with the LLM backend
+            # Steps 3+4: Stream the LLM response and speak it sentence by
+            # sentence, so speech starts before generation finishes.
             print(f"🤖 Processing with {backend_name}...")
-            response = llm.generate_response(
-                text, args.backend, llm_model, args.llm_url
-            )
 
-            print(f"🤖 Assistant: {response}")
+            # Producer thread: stream token deltas and assemble sentences.
+            # TTS stays on the main thread — pyttsx3 engines must be driven
+            # from the thread that created them.
+            sentence_queue: queue.Queue = queue.Queue()
+
+            def produce_sentences(user_text: str = text) -> None:
+                try:
+                    deltas = llm.stream_response(
+                        user_text, args.backend, llm_model, args.llm_url
+                    )
+                    for sentence in text_stream.stream_sentences(deltas):
+                        sentence_queue.put(sentence)
+                finally:
+                    sentence_queue.put(None)  # end-of-response sentinel
+
+            producer = threading.Thread(target=produce_sentences, daemon=True)
+            producer.start()
 
             # CRITICAL: Stop recording BEFORE speaking to prevent echo/feedback
-            # This must happen before text_to_speech() to ensure recording is stopped
-            state.is_recording = False
-
-            # Explicitly stop and close the audio stream if it's still open
-            if state.audio_stream is not None:
-                try:
-                    state.audio_stream.stop()
-                    state.audio_stream.close()
-                except Exception as e:
-                    print(f"Warning: Error closing audio stream: {e}")
-                finally:
-                    state.audio_stream = None
+            tts.begin_speaking()
 
             # Clear any remaining audio in the queue
             # This prevents processing TTS output that might have been captured
@@ -203,9 +208,17 @@ def main() -> None:
                 except queue.Empty:
                     break
 
-            # Step 4: Convert response to speech
             print("🔊 Speaking...")
-            tts.text_to_speech(response)
+            try:
+                while True:
+                    sentence = sentence_queue.get()
+                    if sentence is None:
+                        break
+                    print(f"🤖 Assistant: {sentence}")
+                    tts.speak_sentence(sentence)
+            finally:
+                tts.end_speaking()
+            producer.join()
 
             # Ensure speaking is completely finished before continuing
             # Double-check that TTS is done (safety check)

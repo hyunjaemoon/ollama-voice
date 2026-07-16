@@ -315,6 +315,85 @@ const voiceLog = document.getElementById('voiceLog');
 const voiceAudio = document.getElementById('voiceAudio');
 let rec = null;  // {ctx, stream, node, chunks}
 
+// 44-byte silent WAV: played inside the mic-button tap to unlock programmatic
+// audio playback on iOS Safari (autoplay needs a user gesture per element).
+const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=';
+
+// JS port of text_stream.SentenceAssembler — keep the splitting rules in sync.
+const SENT_BOUNDARY = /[.!?…]["')\]]*(?=\s)/g;
+const ABBREVIATIONS = new Set(['mr','mrs','ms','dr','prof','sr','jr','st','vs','etc','e.g','i.e','no','vol','approx']);
+class SentenceAssembler {
+  constructor(minChars = 12) { this.buf = ''; this.minChars = minChars; }
+  feed(delta) {
+    this.buf += delta;
+    const out = [];
+    for (;;) {
+      const end = this.nextBoundary();
+      if (end === null) break;
+      const s = this.buf.slice(0, end).trim();
+      this.buf = this.buf.slice(end).replace(/^\s+/, '');
+      if (s) out.push(s);
+    }
+    return out;
+  }
+  flush() { const s = this.buf.trim(); this.buf = ''; return s || null; }
+  nextBoundary() {
+    const cands = [];
+    SENT_BOUNDARY.lastIndex = 0;
+    let m;
+    while ((m = SENT_BOUNDARY.exec(this.buf)) !== null) {
+      const end = m.index + m[0].length;
+      if (end < this.minChars) continue;
+      if (this.falseBoundary(m.index)) continue;
+      cands.push(end); break;
+    }
+    const para = this.buf.indexOf('\n\n');
+    if (para !== -1 && this.buf.slice(0, para).trim()) cands.push(para + 2);
+    return cands.length ? Math.min(...cands) : null;
+  }
+  falseBoundary(i) {
+    if (this.buf[i] !== '.') return false;
+    const before = this.buf.slice(0, i);
+    const m = before.match(/([A-Za-z][A-Za-z.]*|\d+)$/);
+    if (!m) return false;
+    const word = m[1];
+    if (/^\d+$/.test(word))  // "1." at line start is a list marker
+      return m.index === 0 || before[m.index - 1] === '\n';
+    if (ABBREVIATIONS.has(word.toLowerCase())) return true;
+    return word.split('.').filter(Boolean).every(seg => seg.length === 1);  // initials, "U.S."
+  }
+}
+
+// Plays sentences strictly in order while synthesis of the next sentence
+// overlaps playback of the current one (each fetch starts at enqueue time).
+class SpeechQueue {
+  constructor(audioEl) { this.audioEl = audioEl; this.chain = Promise.resolve(); this.onFirstAudio = null; }
+  enqueue(sentence) {
+    const fetchP = fetch('/v1/audio/speech', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({input: sentence})
+    }).then(r => r.ok ? r.blob() : Promise.reject(new Error(`TTS failed (${r.status})`)));
+    this.chain = this.chain
+      .then(() => fetchP)
+      .then(blob => this.play(blob))
+      .catch(e => console.warn('speech skipped:', e));
+    return this.chain;
+  }
+  play(blob) {
+    return new Promise(resolve => {
+      const url = URL.createObjectURL(blob);
+      const el = this.audioEl;
+      const done = () => { URL.revokeObjectURL(url); resolve(); };
+      el.src = url;
+      el.onended = done;
+      el.onerror = done;
+      if (this.onFirstAudio) { this.onFirstAudio(); this.onFirstAudio = null; }
+      el.play().catch(done);
+    });
+  }
+  done() { return this.chain; }
+}
+
 function vToast(msg, err=false) { voiceToast.className = 'toast' + (err ? ' err' : ''); voiceToast.textContent = msg; }
 function vLine(cls, text) {
   const div = document.createElement('div');
@@ -368,10 +447,14 @@ async function voiceTurn(blob) {
   const stt = await sttRes.json();
   if (!sttRes.ok) throw new Error(stt.error?.message || `STT failed (${sttRes.status})`);
   vLine('you', stt.text);
-  // 2. LLM (streaming)
+  // 2. LLM (streaming) → sentence-by-sentence TTS pipeline: each completed
+  // sentence is synthesized and spoken while the rest is still generating.
   vToast('thinking…');
   const line = vLine('asst', '');
-  const llmT0 = performance.now(); let first = null;
+  const llmT0 = performance.now(); let first = null, firstAudio = null;
+  const asm = new SentenceAssembler();
+  const speech = new SpeechQueue(voiceAudio);
+  speech.onFirstAudio = () => { firstAudio = performance.now() - t0; vToast('speaking…'); };
   const res = await fetch('/v1/chat/completions', {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({messages:[{role:'user',content:stt.text}], stream:true})
@@ -387,22 +470,16 @@ async function voiceTurn(blob) {
       const p = l.slice(5).trim(); if (p === '[DONE]') continue;
       try { const d = JSON.parse(p).choices?.[0]?.delta?.content;
         if (d) { if (first===null) first = performance.now()-llmT0; line._out.textContent += d;
-                 voiceLog.scrollTop = voiceLog.scrollHeight; } } catch {}
+                 voiceLog.scrollTop = voiceLog.scrollHeight;
+                 for (const s of asm.feed(d)) speech.enqueue(s); } } catch {}
     }
   }
-  const reply = line._out.textContent;
   const llmMs = performance.now() - llmT0;
-  // 3. TTS + playback
-  vToast('synthesizing speech…');
-  const ttsRes = await fetch('/v1/audio/speech', {
-    method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({input: reply})
-  });
-  if (!ttsRes.ok) { const e = await ttsRes.json().catch(()=>({})); throw new Error(e.error?.message || `TTS failed (${ttsRes.status})`); }
-  const ttsMs = ttsRes.headers.get('X-TTS-Ms');
-  voiceAudio.src = URL.createObjectURL(await ttsRes.blob());
-  voiceAudio.play().catch(()=>{});
-  vLine('meta', `STT ${stt.stt_ms} ms · TTFT ${first?first.toFixed(0):'—'} ms · LLM ${llmMs.toFixed(0)} ms · TTS ${ttsMs||'—'} ms · turn ${(performance.now()-t0).toFixed(0)} ms`);
+  // 3. Speak the tail and wait for playback to finish
+  const rest = asm.flush();
+  if (rest) speech.enqueue(rest);
+  await speech.done();
+  vLine('meta', `STT ${stt.stt_ms} ms · TTFT ${first?first.toFixed(0):'—'} ms · LLM ${llmMs.toFixed(0)} ms · first audio ${firstAudio?firstAudio.toFixed(0):'—'} ms · turn ${(performance.now()-t0).toFixed(0)} ms`);
   vToast('');
 }
 
@@ -415,6 +492,10 @@ micBtn.onclick = async () => {
     return;
   }
   micBtn.textContent = '🎤 Start recording';
+  // Unlock audio playback within this user gesture (iOS Safari) so the
+  // speech queue can start playing once synthesis finishes.
+  voiceAudio.src = SILENT_WAV;
+  voiceAudio.play().catch(()=>{});
   const blob = stopRecording();
   try { await voiceTurn(blob); }
   catch (e) { vToast(String(e.message || e), true); }

@@ -45,19 +45,23 @@ class OllamaBackend(LLMBackend):
                 model=self.model, prompt="ping", options={"num_predict": 1},
             )
 
-    def stream(self, prompt: str) -> Iterator[str]:
+    def stream(self, prompt: str, system: Optional[str] = None) -> Iterator[str]:
         # Try with thinking disabled first, then fall back for older clients.
         for think in (False, None):
             try:
-                yield from self._stream_once(prompt, think)
+                yield from self._stream_once(prompt, think, system)
                 return
             except TypeError:
                 continue  # `think` kwarg unsupported → retry without it
             except Exception as e:  # noqa: BLE001
                 raise BackendError(f"Ollama generation failed: {e}") from e
 
-    def _stream_once(self, prompt: str, think: Optional[bool]) -> Iterator[str]:
+    def _stream_once(
+        self, prompt: str, think: Optional[bool], system: Optional[str]
+    ) -> Iterator[str]:
         kwargs = dict(model=self.model, prompt=prompt, stream=True)
+        if system:
+            kwargs["system"] = system
         if think is not None:
             kwargs["think"] = think
         for chunk in ollama.generate(**kwargs):

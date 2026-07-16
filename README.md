@@ -21,7 +21,9 @@ Then open <http://127.0.0.1:8000> to switch the active backend live and send pro
 
 ### Voice chat
 
-The dashboard includes a push-to-talk voice chat: press the mic button, speak, and press again to send. Speech processing stays fully local on the server — the browser uploads your recording to `POST /v1/audio/transcriptions` (faster-whisper STT, loaded lazily on first use; size via `--whisper-model`), the reply streams through the metered `/v1/chat/completions` path, and `POST /v1/audio/speech` synthesizes a WAV (macOS `say`, or `pyttsx3` elsewhere) that plays back in the tab, along with a per-turn latency breakdown (STT · TTFT · LLM · TTS).
+The dashboard includes a push-to-talk voice chat: press the mic button, speak, and press again to send. Speech processing stays fully local on the server — the browser uploads your recording to `POST /v1/audio/transcriptions` (faster-whisper STT, loaded lazily on first use; size via `--whisper-model`), the reply streams through the metered `/v1/chat/completions` path, and `POST /v1/audio/speech` synthesizes WAVs (macOS `say`, or `pyttsx3` elsewhere) that play back in the tab, along with a per-turn latency breakdown (STT · TTFT · LLM · first audio).
+
+Speech is pipelined sentence-by-sentence: as the LLM streams, each completed sentence is synthesized and spoken while the rest is still generating, so you hear the first words roughly as soon as the first sentence finishes decoding instead of waiting for the whole reply. A default system prompt (see `SYSTEM_PROMPT` in `config.py`) keeps replies short and conversational — plain spoken sentences with no markdown — and any `system` message sent by an API client overrides it.
 
 ```bash
 pip install -r requirements-serve.txt   # includes faster-whisper for voice chat
@@ -29,11 +31,21 @@ pip install -r requirements-serve.txt   # includes faster-whisper for voice chat
 
 If the Whisper download from Hugging Face is unavailable, `--whisper-model` also accepts a local model directory (containing `model.bin`, `config.json`, `tokenizer.json`, `vocabulary.txt` — e.g. fetched from a mirror such as `hf-mirror.com/Systran/faster-whisper-base`).
 
+### Using it from your phone (same Wi-Fi)
+
+Browsers only allow microphone access in a secure context, so reaching the dashboard from a phone needs HTTPS:
+
+```bash
+python serve.py --lan   # shortcut for --host 0.0.0.0 --ssl
+```
+
+This generates a self-signed certificate (cached in `.certs/`, regenerated when your LAN IP changes) and prints an `https://<your-lan-ip>:8000` URL. Open it on the phone, accept the one-time certificate warning (Advanced → Proceed), and push-to-talk works like on the desktop. `--ssl` is also available on its own to serve HTTPS on any host.
+
 ## Features
 
 - 🎤 **Speech-to-Text**: Uses `faster-whisper` for accurate, local speech recognition with VAD-based silence detection
 - 🤖 **LLM Processing**: Integrates with Ollama — swap in any local model (Llama, Qwen, Gemma, DeepSeek, ...) — or a [Furiosa LLM](https://developer.furiosa.ai/v2026.3.0/en/get_started/furiosa_llm.html) server for RNGD NPU inference
-- 🔊 **Text-to-Speech**: Uses system voices via `pyttsx3` for offline speech synthesis
+- 🔊 **Streaming Text-to-Speech**: Uses system voices via `pyttsx3` for offline speech synthesis, spoken sentence-by-sentence as the LLM streams so replies start almost immediately
 - ⚡ **GPU Accelerated**: Leverages GPU acceleration when available
 - 🔒 **Fully Local & Private**: All processing happens on-device — ideal for privacy-first, local-first AI setups
 - 🎯 **Hands-free Conversation**: Continuous listening with adaptive silence detection and echo prevention for natural back-and-forth

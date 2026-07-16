@@ -62,6 +62,15 @@ NO_DATA_PROCESSING_COUNT: int = 50
 # Minimum chunks before processing without new data
 MIN_AUDIO_CHUNKS_FOR_PROCESSING: int = 10
 
+# System prompt for the voice agent — keeps replies natural to speak aloud
+SYSTEM_PROMPT: str = (
+    "You are a friendly voice assistant. Reply conversationally, as if "
+    "speaking aloud to the user. Keep answers short — one to three sentences "
+    "unless the user asks for more detail. Use plain spoken sentences only: "
+    "no markdown, no bullet points, no numbered lists, no headings, no code "
+    "blocks, and no emojis."
+)
+
 # LLM backend configuration
 DEFAULT_LLM_BACKEND: str = "ollama"  # LLM backend: "ollama" or "furiosa"
 DEFAULT_OLLAMA_MODEL: str = "llama3.2"  # Default model for the Ollama backend

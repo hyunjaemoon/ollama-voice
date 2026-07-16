@@ -7,3 +7,5 @@ psutil
 numpy
 faster-whisper
 python-multipart
+# Self-signed HTTPS for phone access (--ssl / --lan); falls back to openssl CLI
+cryptography

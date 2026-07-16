@@ -5,26 +5,20 @@ This module handles the conversion of text to speech, including proper
 management of recording state to prevent audio feedback loops.
 """
 
-import queue
 import time
 
 import config
 import state
 
 
-def text_to_speech(text: str) -> None:
+def begin_speaking() -> None:
     """
-    Convert text to speech using TTS engine.
+    Prepare for TTS output by silencing the microphone.
 
-    This function stops recording before speaking to prevent audio feedback loops
-    (the microphone would pick up the TTS output). After speaking, it adds a
-    small delay to let audio settle before resuming recording.
-
-    Args:
-        text: Text to convert to speech
+    CRITICAL: Recording must stop while speaking to prevent echo/feedback —
+    the microphone would otherwise pick up the TTS output and create a
+    feedback loop. Call this once before the first sentence of a response.
     """
-    # CRITICAL: Stop recording while speaking to prevent echo/feedback
-    # The microphone would otherwise pick up the TTS output and create a feedback loop
     state.is_recording = False
     state.is_speaking = True
 
@@ -38,20 +32,51 @@ def text_to_speech(text: str) -> None:
         finally:
             state.audio_stream = None
 
+
+def speak_sentence(text: str) -> None:
+    """
+    Speak one sentence, blocking until playback finishes.
+
+    Must run on the thread that created the TTS engine (pyttsx3 engines are
+    not thread-safe). Call between begin_speaking() and end_speaking().
+
+    Args:
+        text: Text to convert to speech
+    """
     try:
-        # Queue text for speech synthesis and wait for completion
         # runAndWait() blocks until speech is completely finished
         state.tts_engine.say(text)
         state.tts_engine.runAndWait()
-
-        # Additional wait to ensure TTS is completely done
-        # Some TTS engines may return before audio playback finishes
-        time.sleep(0.2)
     except Exception as e:
         print(f"Error in text-to-speech: {e}")
+
+
+def end_speaking() -> None:
+    """
+    Mark speech finished and let the audio settle before listening again.
+
+    The extra delays prevent the microphone from immediately picking up
+    echo/reverb from the tail of the TTS output.
+    """
+    # Some TTS engines may return before audio playback finishes
+    time.sleep(0.2)
+    state.is_speaking = False
+    time.sleep(config.TTS_SETTLE_DELAY)
+
+
+def text_to_speech(text: str) -> None:
+    """
+    Convert text to speech using TTS engine.
+
+    Convenience wrapper for speaking a complete response in one call. For
+    streaming responses, use begin_speaking() / speak_sentence() /
+    end_speaking() directly to speak sentence-by-sentence.
+
+    Args:
+        text: Text to convert to speech
+    """
+    begin_speaking()
+    try:
+        speak_sentence(text)
     finally:
-        # Mark speaking as complete
-        state.is_speaking = False
-        # Small delay after speaking to let audio settle
-        # This prevents the microphone from immediately picking up echo/reverb
-        time.sleep(config.TTS_SETTLE_DELAY)
+        end_speaking()

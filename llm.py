@@ -12,6 +12,7 @@ spoken-friendly error message if processing fails.
 
 import re
 import traceback
+from typing import Iterator
 
 import ollama
 import requests
@@ -40,6 +41,47 @@ def generate_response(text: str, backend: str, model: str, llm_url: str) -> str:
     return process_with_ollama(text, model)
 
 
+def stream_response(
+    text: str, backend: str, model: str, llm_url: str
+) -> Iterator[str]:
+    """
+    Stream token deltas from the configured LLM backend.
+
+    Only the ollama backend streams natively; furiosa falls back to yielding
+    the full response as a single chunk. Feeding these deltas through
+    ``text_stream.stream_sentences`` lets TTS start speaking the first
+    sentence while the rest is still generating.
+
+    Args:
+        text: Input text to process
+        backend: LLM backend to use ("ollama" or "furiosa")
+        model: Name of the model to use
+        llm_url: Base URL of the OpenAI-compatible server (furiosa backend only)
+
+    Yields:
+        Incremental response text deltas (a spoken-friendly error message is
+        yielded if streaming fails)
+    """
+    if backend == "furiosa":
+        yield process_with_furiosa(text, model, llm_url)
+        return
+    try:
+        for chunk in ollama.generate(
+            model=model, prompt=text, system=config.SYSTEM_PROMPT, stream=True
+        ):
+            delta = (
+                chunk.get("response")
+                if isinstance(chunk, dict)
+                else getattr(chunk, "response", None)
+            )
+            if delta:
+                yield delta
+    except Exception as e:
+        print(f"Error streaming from Ollama: {e}")
+        traceback.print_exc()
+        yield LLM_ERROR_MESSAGE
+
+
 def process_with_furiosa(text: str, model: str, base_url: str) -> str:
     """
     Process text with a Furiosa LLM server via its OpenAI-compatible API.
@@ -60,7 +102,10 @@ def process_with_furiosa(text: str, model: str, base_url: str) -> str:
             f"{base_url.rstrip('/')}/chat/completions",
             json={
                 "model": model,
-                "messages": [{"role": "user", "content": text}],
+                "messages": [
+                    {"role": "system", "content": config.SYSTEM_PROMPT},
+                    {"role": "user", "content": text},
+                ],
             },
             timeout=config.LLM_REQUEST_TIMEOUT,
         )
@@ -100,7 +145,9 @@ def process_with_ollama(text: str, model: str) -> str:
     """
     try:
         # Generate response from Ollama (non-streaming mode)
-        response_obj = ollama.generate(model=model, prompt=text, stream=False)
+        response_obj = ollama.generate(
+            model=model, prompt=text, system=config.SYSTEM_PROMPT, stream=False
+        )
 
         # Ollama can return responses in different formats depending on version
         # Try multiple extraction methods to handle various response types

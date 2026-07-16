@@ -496,7 +496,8 @@ def main():
     parser.add_argument("--default", default=None,
                         help="Backend to start current (default: first registered)")
     parser.add_argument("--whisper-model", default="base",
-                        help="Whisper model size for voice chat (default: base)")
+                        help="Whisper model size or local model directory for "
+                             "voice chat (default: base)")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()

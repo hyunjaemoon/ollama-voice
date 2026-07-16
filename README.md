@@ -27,6 +27,8 @@ The dashboard includes a push-to-talk voice chat: press the mic button, speak, a
 pip install -r requirements-serve.txt   # includes faster-whisper for voice chat
 ```
 
+If the Whisper download from Hugging Face is unavailable, `--whisper-model` also accepts a local model directory (containing `model.bin`, `config.json`, `tokenizer.json`, `vocabulary.txt` — e.g. fetched from a mirror such as `hf-mirror.com/Systran/faster-whisper-base`).
+
 ## Features
 
 - 🎤 **Speech-to-Text**: Uses `faster-whisper` for accurate, local speech recognition with VAD-based silence detection
